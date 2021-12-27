@@ -1,2 +1,5 @@
 .idea
 .mypy*
+*.egg_info/
+dist/
+venv/

@@ -2,28 +2,28 @@ from __future__ import annotations
 
 from itertools import chain, repeat
 import asyncio
-from typing import cast, TypeVar, Type, Generic, Coroutine, Protocol, Any, Callable, overload
+import typing as t
 from dataclasses import dataclass
 from functools import wraps, cached_property, partial
 
-_T = TypeVar('_T')
-_S = TypeVar('_S')
-_R = TypeVar('_R')
-_T_cov = TypeVar('_T_cov', covariant=True)
-_T_con = TypeVar('_T_con', contravariant=True)
+_T = t.TypeVar('_T')
+_S = t.TypeVar('_S')
+_R = t.TypeVar('_R')
+_T_cov = t.TypeVar('_T_cov', covariant=True)
+_T_con = t.TypeVar('_T_con', contravariant=True)
 
-_SimpleCoroutine = Coroutine[Any, Any, _T]
+_SimpleCoroutine = t.Coroutine[t.Any, t.Any, _T]
 
 _NO_CALLABLE = object()
 
 
-def make_async(func: Callable[[_T], _SimpleCoroutine[_S] | _S]) -> Callable[[_T], _SimpleCoroutine[_S]]:
+def make_async(func: t.Callable[[_T], _SimpleCoroutine[_S] | _S]) -> t.Callable[[_T], _SimpleCoroutine[_S]]:
     """
     Decorator to turn a non async function into a coroutine by running it in the default executor pool.
     """
 
     if asyncio.iscoroutinefunction(func):
-        return cast(Callable[[_T], _SimpleCoroutine[_S]], func)
+        return t.cast(t.Callable[[_T], _SimpleCoroutine[_S]], func)
 
     @wraps(func)
     async def _callback(*args):
@@ -34,18 +34,18 @@ def make_async(func: Callable[[_T], _SimpleCoroutine[_S] | _S]) -> Callable[[_T]
 
 
 @dataclass(init=True)
-class accessor(Generic[_S]):
-    class getter_t(Protocol[_T_cov]):
-        def __call__(self, *, predicate: Callable[[], bool] | None) -> _SimpleCoroutine[_T_cov]: ...
+class accessor(t.Generic[_S]):
+    class getter_t(t.Protocol[_T_cov]):
+        def __call__(self, *, predicate: t.Callable[[], bool] | None) -> _SimpleCoroutine[_T_cov]: ...
 
-    class setter_t(Protocol[_T_con]):
+    class setter_t(t.Protocol[_T_con]):
         def __call__(self, value: _T_con) -> _SimpleCoroutine[None]: ...
 
     set: setter_t[_S]
     get: getter_t[_S]
 
 
-class condition_property(cached_property, Generic[_T]):
+class condition_property(cached_property, t.Generic[_T]):
     """
     This is a decorator to create a cached ``accessor`` to handle access to some data via a asyncio.Condition
     You can use it like the normal @property decorator, but the result of the lookup (__get__ of the descriptor) will
@@ -63,9 +63,9 @@ class condition_property(cached_property, Generic[_T]):
     """
 
     def __init__(self: condition_property[_T],
-                 fget: Callable[[Any], _T] | None = None,
-                 fset: Callable[[Any, _T], None] | None = None,
-                 fdel: Callable[[Any], None] | None = None,
+                 fget: t.Callable[[t.Any], _T] | None = None,
+                 fset: t.Callable[[t.Any, _T], None] | None = None,
+                 fdel: t.Callable[[t.Any], None] | None = None,
                  doc: str | None = None) -> None:
         self.fget = fget
         self.fset = fset
@@ -101,7 +101,7 @@ class condition_property(cached_property, Generic[_T]):
 
     async def _get(self,
                    *,
-                   predicate: Callable[[], bool] | None | object = _NO_CALLABLE,
+                   predicate: t.Callable[[], bool] | None | object = _NO_CALLABLE,
                    condition: asyncio.Condition,
                    obj: object):
 
@@ -127,23 +127,24 @@ class condition_property(cached_property, Generic[_T]):
     def __set__(self, obj, value: _T):
         raise AttributeError(f"can't set {self.attrname} directly, use set()")
 
-    @overload
-    def __get__(self, instance: None, owner: Type[Any] | None = None) -> condition_property[_T]:
+    @t.overload
+    def __get__(self, instance: None, owner: t.Type[t.Any] | None = None) -> condition_property[_T]:
         ...
 
-    @overload
-    def __get__(self, instance: object, owner: Type[Any] | None = None) -> accessor[_T]:
+    @t.overload
+    def __get__(self, instance: object, owner: t.Type[t.Any] | None = None) -> accessor[_T]:
         ...
 
-    def __get__(self, instance: object | None, owner: Type[Any] | None = None):
+    def __get__(self, instance: object | None, owner: t.Type[t.Any] | None = None) -> accessor[_T] | condition_property[
+        _T]:
         return super().__get__(instance, owner)
 
-    def getter(self: condition_property[_T], fget: Callable[[Any], _T]) -> condition_property[_T]:
+    def getter(self: condition_property[_T], fget: t.Callable[[t.Any], _T]) -> condition_property[_T]:
         prop = type(self)(fget, self.fset, self.fdel, self.__doc__)
         prop.attrname = self.attrname
         return prop
 
-    def setter(self: condition_property[_T], fset: Callable[[Any, _T], None]) -> condition_property[_T]:
+    def setter(self: condition_property[_T], fset: t.Callable[[t.Any, _T], None]) -> condition_property[_T]:
         prop = type(self)(self.fget, fset, self.fdel, self.__doc__)
         prop.attrname = self.attrname
         return prop
@@ -154,14 +155,14 @@ class condition_property(cached_property, Generic[_T]):
         return prop
 
 
-class CoroutineWrapper(Coroutine[_T, _S, _R]):
+class CoroutineWrapper(t.Coroutine[_T, _S, _R]):
     """
     Complex Coroutines are easy to implement with native ``def async`` coroutine syntax, but often require
     some smaller coroutines to compose. Inheriting from CoroutineWrapper, a complex coroutine can encapsulate
     all it's dependencies and auxiliary methods.
     """
 
-    def __init__(self: CoroutineWrapper[_T, _S, _R], *, coroutine: Coroutine[_T, _S, _R]):
+    def __init__(self: CoroutineWrapper[_T, _S, _R], *, coroutine: t.Coroutine[_T, _S, _R]):
         self._coroutine = coroutine
 
     def __await__(self):
