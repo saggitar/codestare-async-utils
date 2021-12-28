@@ -14,7 +14,7 @@ _NO_CALLABLE = object()
 @dataclass(init=True)
 class accessor(t.Generic[_S]):
     class getter_t(t.Protocol[_T_cov]):
-        def __call__(self, *, predicate: t.Callable[[], bool] | None) -> _SimpleCoroutine[_T_cov]: ...
+        def __call__(self, *, predicate: t.Callable[[], bool] | None = ...) -> _SimpleCoroutine[_T_cov]: ...
 
     class setter_t(t.Protocol[_T_con]):
         def __call__(self, value: _T_con) -> _SimpleCoroutine[None]: ...
@@ -41,8 +41,8 @@ class condition_property(cached_property, t.Generic[_T]):
     """
 
     def __init__(self: condition_property[_T],
-                 fget: t.Callable[[t.Any], _T] | None = None,
-                 fset: t.Callable[[t.Any, _T], None] | None = None,
+                 fget: t.Callable[[t.Any], _T | None] | None = None,
+                 fset: t.Callable[[t.Any, _T | None], None] | None = None,
                  fdel: t.Callable[[t.Any], None] | None = None,
                  doc: str | None = None) -> None:
         self.fget = fget
@@ -113,16 +113,19 @@ class condition_property(cached_property, t.Generic[_T]):
     def __get__(self, instance: object, owner: t.Type[t.Any] | None = None) -> accessor[_T]:
         ...
 
-    def __get__(self, instance: object | None, owner: t.Type[t.Any] | None = None) -> accessor[_T] | condition_property[
-        _T]:
-        return super().__get__(instance, owner)
+    def __get__(self, instance: object | None,
+                owner: t.Type[t.Any] | None = None) -> accessor[_T] | condition_property[_T]:
+        if instance is None:
+            return t.cast(condition_property[_T], super().__get__(instance, owner))
+        else:
+            return t.cast(accessor[_T], super().__get__(instance, owner))
 
-    def getter(self: condition_property[_T], fget: t.Callable[[t.Any], _T]) -> condition_property[_T]:
+    def getter(self: condition_property[_T], fget: t.Callable[[t.Any], _T | None]) -> condition_property[_T]:
         prop = type(self)(fget, self.fset, self.fdel, self.__doc__)
         prop.attrname = self.attrname
         return prop
 
-    def setter(self: condition_property[_T], fset: t.Callable[[t.Any, _T], None]) -> condition_property[_T]:
+    def setter(self: condition_property[_T], fset: t.Callable[[t.Any, _T | None], None]) -> condition_property[_T]:
         prop = type(self)(self.fget, fset, self.fdel, self.__doc__)
         prop.attrname = self.attrname
         return prop
@@ -131,5 +134,3 @@ class condition_property(cached_property, t.Generic[_T]):
         prop = type(self)(self.fget, self.fset, fdel, self.__doc__)
         prop.attrname = self.attrname
         return prop
-
-
