@@ -4,33 +4,11 @@ from itertools import chain, repeat
 import asyncio
 import typing as t
 from dataclasses import dataclass
-from functools import wraps, cached_property, partial
+from functools import cached_property, partial
 
-_T = t.TypeVar('_T')
-_S = t.TypeVar('_S')
-_R = t.TypeVar('_R')
-_T_cov = t.TypeVar('_T_cov', covariant=True)
-_T_con = t.TypeVar('_T_con', contravariant=True)
-
-_SimpleCoroutine = t.Coroutine[t.Any, t.Any, _T]
+from ._typing import _T, _S, _T_cov, _T_con, _SimpleCoroutine
 
 _NO_CALLABLE = object()
-
-
-def make_async(func: t.Callable[[_T], _SimpleCoroutine[_S] | _S]) -> t.Callable[[_T], _SimpleCoroutine[_S]]:
-    """
-    Decorator to turn a non async function into a coroutine by running it in the default executor pool.
-    """
-
-    if asyncio.iscoroutinefunction(func):
-        return t.cast(t.Callable[[_T], _SimpleCoroutine[_S]], func)
-
-    @wraps(func)
-    async def _callback(*args):
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, func, *args)
-
-    return _callback
 
 
 @dataclass(init=True)
@@ -155,29 +133,3 @@ class condition_property(cached_property, t.Generic[_T]):
         return prop
 
 
-class CoroutineWrapper(t.Coroutine[_T, _S, _R]):
-    """
-    Complex Coroutines are easy to implement with native ``def async`` coroutine syntax, but often require
-    some smaller coroutines to compose. Inheriting from CoroutineWrapper, a complex coroutine can encapsulate
-    all it's dependencies and auxiliary methods.
-    """
-
-    def __init__(self: CoroutineWrapper[_T, _S, _R], *, coroutine: t.Coroutine[_T, _S, _R]):
-        self._coroutine = coroutine
-
-    def __await__(self):
-        return self._coroutine.__await__()
-
-    def send(self, value):
-        return self._coroutine.send(value)
-
-    def throw(self, typ, val=None, tb=None):
-        if val is None:
-            return self._coroutine.throw(typ)
-        elif tb is None:
-            return self._coroutine.throw(typ, val)
-        else:
-            return self._coroutine.throw(typ, val, tb)
-
-    def close(self):
-        return self._coroutine.close()

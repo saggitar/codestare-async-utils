@@ -6,6 +6,7 @@ pyproject.toml
 setup.cfg
 setup.py
 src/codestare/async_util.py
+src/codestare/py.typed
 src/codestare_async_utils.egg-info/PKG-INFO
 src/codestare_async_utils.egg-info/SOURCES.txt
 src/codestare_async_utils.egg-info/dependency_links.txt
