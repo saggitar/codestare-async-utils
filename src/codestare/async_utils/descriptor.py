@@ -41,8 +41,8 @@ class condition_property(cached_property, t.Generic[_T]):
     """
 
     def __init__(self: condition_property[_T],
-                 fget: t.Callable[[t.Any], _T | None] | None = None,
-                 fset: t.Callable[[t.Any, _T | None], None] | None = None,
+                 fget: t.Callable[[t.Any], _T] | None = None,
+                 fset: t.Callable[[t.Any, _T], None] | None = None,
                  fdel: t.Callable[[t.Any], None] | None = None,
                  doc: str | None = None) -> None:
         self.fget = fget
@@ -120,12 +120,12 @@ class condition_property(cached_property, t.Generic[_T]):
         else:
             return t.cast(accessor[_T], super().__get__(instance, owner))
 
-    def getter(self: condition_property[_T], fget: t.Callable[[t.Any], _T | None]) -> condition_property[_T]:
+    def getter(self: condition_property[_T], fget: t.Callable[[t.Any], _T]) -> condition_property[_T]:
         prop = type(self)(fget, self.fset, self.fdel, self.__doc__)
         prop.attrname = self.attrname
         return prop
 
-    def setter(self: condition_property[_T], fset: t.Callable[[t.Any, _T | None], None]) -> condition_property[_T]:
+    def setter(self: condition_property[_T], fset: t.Callable[[t.Any, _T], None]) -> condition_property[_T]:
         prop = type(self)(self.fget, fset, self.fdel, self.__doc__)
         prop.attrname = self.attrname
         return prop
