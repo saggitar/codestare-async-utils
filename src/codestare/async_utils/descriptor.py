@@ -1,26 +1,102 @@
 from __future__ import annotations
 
-from itertools import chain, repeat
 import asyncio
 import typing as t
-from dataclasses import dataclass
 from functools import cached_property, partial
 
-from ._typing import _T, _S, _T_cov, _T_con, _SimpleCoroutine
+from ._typing import _T
 
-_NO_CALLABLE = object()
+# pycharm is to stupid to understand this as of now
+# https://youtrack.jetbrains.com/issue/PY-29257
+_fget_type = t.Callable[[], _T]
+_fset_type = t.Callable[[_T], None]
 
 
-@dataclass(init=True)
-class accessor(t.Generic[_S]):
-    class getter_t(t.Protocol[_T_cov]):
-        def __call__(self, *, predicate: t.Callable[[], bool] | None = ...) -> _SimpleCoroutine[_T_cov]: ...
+class accessor(t.Generic[_T]):
+    """
+    The ``get`` coroutine of the accessor takes an optional predicate callable (or None, see below),
+    and waits for the predicate result to be truthy, then returns the result of the getter. (see the ``wait_for``
+    documentation of asyncio.Condition for more info on the predicate callable).
+    The default predicate (used when ``predicate=None``) returns [False, True, True, ...], so ``get`` blocks once,
+    until it is notified from a ``set`` and then does not block again.
+    Passing ``predicate=(lambda: True)`` will make ``get`` not block at all.
 
-    class setter_t(t.Protocol[_T_con]):
-        def __call__(self, value: _T_con) -> _SimpleCoroutine[None]: ...
+    The ``set`` coroutine of the accessor sets the value and notifies every ``get``.
+    """
+    fget: _fget_type[_T]
+    fset: _fset_type[_T]
 
-    set: setter_t[_S]
-    get: getter_t[_S]
+    @t.overload
+    def __init__(self: accessor[t.Any],
+                 *,
+                 funcs: None = ...,
+                 condition: asyncio.Condition | None = None,
+                 ):
+        ...
+
+    @t.overload
+    def __init__(self: accessor[_T],
+                 *,
+                 condition: asyncio.Condition | None = None,
+                 ):
+        ...
+
+    @t.overload
+    def __init__(self: accessor[_T],
+                 *,
+                 funcs: t.Tuple[_fget_type[_T], _fset_type[_T]] = ...,
+                 condition: asyncio.Condition | None = None,
+                 ):
+        ...
+
+    def __init__(self,
+                 *,
+                 funcs: t.Tuple | None = None,
+                 condition: asyncio.Condition | None = None,
+                 ):
+        if funcs is None:
+            def set(instance, value):
+                instance._value = value
+
+            def get(instance):
+                return instance._value
+
+            self._value = None
+            fget = get.__get__(self, type(self))
+            fset = set.__get__(self, type(self))
+        else:
+            non_callable = [f for f in funcs if not callable(f)]
+            if non_callable:
+                raise ValueError(f"parameters {non_callable} passed as ``funcs`` tuple are not callable")
+            fget, fset = funcs
+
+        self.fset = fset
+        self.fget = fget
+        self.condition = condition or asyncio.Condition()
+
+    @property
+    def value(self) -> _T | None:
+        return self.fget()
+
+    async def set(self, value: _T):
+        async with self.condition:
+            self.fset(value)
+            self.condition.notify_all()
+
+    async def get(self, *, predicate: t.Callable[[_T], bool] | None = None) -> _T:
+        if predicate is None:
+            # this predicate returns False, True i.e. it will block once and always return after notify
+            _get_value = iter([False, True]).__next__
+            predicate = (
+                lambda _: _get_value()
+            )
+
+        if not callable(predicate):
+            raise ValueError(f"{predicate} is not callable")
+
+        async with self.condition:
+            await self.condition.wait_for(lambda: predicate(self.fget()))
+            return self.fget()
 
 
 class condition_property(cached_property, t.Generic[_T]):
@@ -30,14 +106,6 @@ class condition_property(cached_property, t.Generic[_T]):
     be an ``accessor`` with coroutine attributes to handle safely setting and getting the value (from the objects
     methods passed via ``setter`` and ``getter`` , like in normal properties) by means of a condition.
 
-    The ``get`` coroutine of the accessor takes an optional predicate callable (or None, see below),
-    and waits for the predicate result to be truthy, then returns the result of the getter. (see the ``wait_for``
-    documentation of asyncio.Condition for more info on the predicate callable).
-    The default predicate returns [False, True, True, ...], so ``get`` blocks once, until it is notified
-    from a ``set`` and then does not block again.
-    Passing ``predicate=None`` will make ``get`` not block at all.
-
-    The ``set`` coroutine of the accessor sets the value and notifies every ``get``.
     """
 
     def __init__(self: condition_property[_T],
@@ -55,52 +123,23 @@ class condition_property(cached_property, t.Generic[_T]):
         super().__init__(self._create_accessor)
 
     def _create_accessor(self: 'condition_property[_T]', obj: object) -> accessor[_T]:
-        condition = asyncio.Condition()
-
         return accessor(
-            get=lambda predicate=_NO_CALLABLE: self._get(condition=condition, obj=obj, predicate=predicate),
-            set=partial(self._set, condition=condition, obj=obj),
+            funcs=(partial(self._get, obj), partial(self._set, obj),)
         )
 
-    @staticmethod
-    def _make_default_predicate():
-        return chain(repeat(False, 1), repeat(True)).__next__
-
-    async def _set(self,
-                   value: _T,
-                   *,
-                   condition: asyncio.Condition,
-                   obj: object):
+    def _set(self, obj: object, value: _T):
         if self.fset is None:
             raise AttributeError(f"can't set attribute {self.attrname}")
-        async with condition:
-            self.fset(obj, value)
-            condition.notify_all()
+        self.fset(obj, value)
 
-    async def _get(self,
-                   *,
-                   predicate: t.Callable[[], bool] | None | object = _NO_CALLABLE,
-                   condition: asyncio.Condition,
-                   obj: object):
-
-        if predicate == _NO_CALLABLE:
-            predicate = self._make_default_predicate()
-
-        if predicate is None:
-            predicate = (lambda: True)
-
-        if not callable(predicate):
-            raise ValueError(f"{predicate} is not callable")
-
+    def _get(self, obj: object):
         if self.fget is None:
             raise AttributeError(f'unreadable attribute {self.attrname}')
 
         if self.fset is None:
             raise AttributeError(f"`get` will block until the next value is set, but no setter is defined.")
 
-        async with condition:
-            await condition.wait_for(predicate)
-            return self.fget(obj)
+        return self.fget(obj)
 
     def __set__(self, obj, value: _T):
         raise AttributeError(f"can't set {self.attrname} directly, use set()")
