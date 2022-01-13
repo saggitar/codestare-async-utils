@@ -1,5 +1,6 @@
 .idea
 .mypy*
-*.egg_info/
+*.egg_info
+__pycache__
 dist/
 venv/
