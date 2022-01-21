@@ -2,51 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import signal
 import sys
+import traceback
 import typing as t
-from contextlib import suppress
-from functools import partial
-from warnings import warn
+from contextlib import AsyncExitStack
 
 from ._typing import _T
 from .helper import Registry
-from .wrapper import CoroutineWrapper
 
 log = logging.getLogger(__name__)
-
-
-def sentinel_finished(sentinel_task: asyncio.Future):
-    try:
-        result = sentinel_task.result()
-        return result
-    except Exception:  # noqa
-        msg = f"Exception from sentinel task {sentinel_task}"
-        log.exception(msg)
-
-
-class Sentinel(CoroutineWrapper):
-    def __init__(self, event: asyncio.Event, killall_on_finish: t.Callable[[], bool] | None = None):
-        super().__init__(coroutine=self._run())
-        self.event = event
-        self.callbacks: t.List[t.Awaitable[None]] = []
-        self.killall = killall_on_finish or (lambda: False)
-
-    async def _run(self):
-        try:
-            await self.event.wait()
-        except asyncio.CancelledError:
-            warn(f"Cancelling sentinel task!")
-        finally:
-            for callback in self.callbacks:
-                await callback
-
-            # kill all tasks
-            if self.killall():
-                for task_ in filter(lambda task: not task.done(), asyncio.all_tasks()):
-                    task_.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await task_
-
 
 _T_ExceptionHandlers = t.MutableMapping[t.Tuple[t.Type[Exception], ...], t.Callable[[Exception], t.Any]]
 _TaskYieldType = t.Optional[asyncio.Future]
@@ -58,98 +23,137 @@ class ExcInfo(t.NamedTuple):
     traceback: t.Any | None = None
 
 
-class NurseryChainException(Exception):
+def handle_exception(loop: asyncio.BaseEventLoop, context):
+    # context["message"] will always be there; but context["exception"] may not
+    loop.default_exception_handler(context)
+
+    msg = context.get("tb", context["message"])
+    log.error(msg)
+    log.info("Shutting down...")
+    asyncio.create_task(shutdown(loop, context=context), name=f"shutdown({context['message']})")
+
+
+async def stop_task(task: asyncio.Task):
+    if task is asyncio.current_task():
+        raise ValueError(f"Not allowed to stop task running `stop_task`!")
+
+    task.cancel()
+    return (await asyncio.gather(task, return_exceptions=True))[0]
+
+
+def setup_shutdown_handling(loop):
+    # May want to catch other signals too
+    signals = (signal.SIGHUP, signal.SIGTERM, signal.SIGINT)
+    for s in signals:
+        loop.add_signal_handler(s, lambda _s=s: asyncio.create_task(shutdown(loop, signal=_s), name=f'shutdown({_s})'))
+    loop.set_exception_handler(handle_exception)
+
+
+async def shutdown(loop, signal=None, context=None):
+    if signal:
+        log.info(f"Received exit signal {signal.name}...")
+
+    get_tasks = (lambda: [
+        task_ for task_ in asyncio.all_tasks()
+        if task_ is not asyncio.current_task()
+    ])
+
+    context = context or {}
+    sentinel = context.get('sentinel')
+    if sentinel:
+        result = await stop_task(sentinel)
+    else:
+        result = await asyncio.gather(
+            *map(stop_task, filter(lambda task_: task_.get_name().startswith('sentinel_task:'), get_tasks()))
+        )
+    if result:
+        log.debug(f"Sentinel task[s] stopped with result {result!r}")
+
+    tasks = get_tasks()
+
+    log.info(f"Cancelling {len(tasks)} outstanding tasks")
+    for task in tasks:
+        await stop_task(task)
+
+    loop.stop()
+
+
+class TaskNursery(AsyncExitStack, Registry):
+    __has_handling__: t.Set[asyncio.BaseEventLoop] = set()
+    __unique_key_attr__ = 'name'
 
     @staticmethod
-    def chain_exception(nursery: TaskNursery, sentinel_task: asyncio.Task):
-        try:
-            try:
-                result = sentinel_task.result()
-                return result
-            except Exception as e:
-                raise NurseryChainException from e
-        except NurseryChainException:
-            nursery.exception_info = sys.exc_info()
-            nursery.trigger_sentinel.set()
+    def add_shutdown_handling(loop):
+        if loop not in TaskNursery.__has_handling__:
+            setup_shutdown_handling(loop)
 
+    def stop_task(self, task):
+        if task not in self._tasks:
+            raise ValueError(f"{task} not contained in pending tasks of {self}")
 
-class TaskNursery(Registry):
+        return stop_task(task)
 
-    def __init__(self):
+    def __init__(self, name=None, loop=None):
+        super().__init__()
         self._tasks: t.List[asyncio.Task] = []
-        self.trigger_sentinel = asyncio.Event()
-        self._exc_info: ExcInfo = ExcInfo()
 
         self.exception_handlers: _T_ExceptionHandlers = {}
         self.fallback_handler = log.exception
-        self._sentinel = Sentinel(event=self.trigger_sentinel, killall_on_finish=lambda: any(self.exception_info))
-        self.add_sentinel_callback(
-            self._stop_tasks(),
+        self.loop = loop or asyncio.get_running_loop()
+
+        # teardown behaviour
+        self.push_async_callback(self._stop_all)
+        self.add_shutdown_handling(self.loop)
+        self._sentinel_task = self.create_task(
+            self.sentinel_task(event=asyncio.Event()),  # dummy event which is never set
         )
-        self.sentinel = asyncio.shield(self._sentinel)
-        self.sentinel.add_done_callback(sentinel_finished)
-        self._attached = set()
+        self._sentinel_task.remove_done_callback(self._task_cb)
+        self.name = name or f'TaskNursery-{len(type(self).registry)}'
 
-    def add_exception_handler(self,
-                              handler: t.Callable[[ExcInfo], ...],
-                              *exception_types: t.Type[Exception]):
-        self.exception_handlers.update(**{exception_types: handler})
-
-    def add_sentinel_callback(self, *callbacks: t.Awaitable[None]):
-        self._sentinel.callbacks += list(callbacks)
-
-    def _run_exception_handlers(self):
-        matching_handlers = [handler for types, handler in self.exception_handlers.items()
-                             if any(isinstance(self.exception_info.exc, t) for t in types)]
-
-        for handler in matching_handlers:
-            handler(*self.exception_info)
-
-        if not matching_handlers and self.exception_info:
-            self.fallback_handler("Fallback Exception Handler")
-
-    async def _stop_tasks(self):
-        for task in self._tasks:
-            task.cancel()
-
-        with suppress(asyncio.CancelledError):
-            for task in self._tasks:
-                await task
-
-    @property
-    def exception_info(self) -> ExcInfo:
-        return self._exc_info
-
-    @exception_info.setter
-    def exception_info(self, exc_info):
-        self._exc_info = ExcInfo(*exc_info)
-        self.trigger_sentinel.set()
-
-    def create_task(self, coro: t.Generator[_TaskYieldType, None, _T] | t.Awaitable[_T]) -> asyncio.Task[_T]:
-        future = asyncio.ensure_future(coro)
-        future.add_done_callback(self._task_cb)
-        self._tasks += [future]
-        return future
-
-    def attach(self, parent: TaskNursery):
-        """
-        If the parent nursery sentinel is done, propagate the exception into this task nursery
-
-        :param parent: another Task Nursery
-        """
-        if self in parent._attached:
-            return
-
-        parent.sentinel.add_done_callback(partial(NurseryChainException.chain_exception, self))
-        parent._attached.add(self)
-
-    def _task_cb(self, task):
+    async def sentinel_task(self, event):
         try:
-            task.result()
+            await event.wait()
         except asyncio.CancelledError:
             pass
-        except Exception:  # noqa
-            self.exception_info = sys.exc_info()
-            self._run_exception_handlers()
 
-        self._tasks.remove(task)
+        self._tasks.remove(self._sentinel_task)
+        self._sentinel_task = None
+
+        await self.aclose()
+        return "Success"
+
+    async def _stop_all(self):
+        stoppable = [task for task in self._tasks if task is not asyncio.current_task()]
+        return await asyncio.gather(*map(self.stop_task, stoppable), return_exceptions=True)
+
+    def _task_cb(self, task: asyncio.Task):
+        try:
+            result = task.result()
+            if task in self._tasks:
+                self._tasks.remove(task)
+            return result
+        except asyncio.CancelledError:
+            pass
+        except:  # noqa
+            exc_info = sys.exc_info()
+            self.loop.call_exception_handler(
+                {
+                    'message': f'{exc_info[1]!r} from {task.get_name()!r}',
+                    'task': task,
+                    'tb': traceback.format_exc(),
+                    'sentinel': self._sentinel_task
+                }
+            )
+
+    def create_task(self,
+                    coro: t.Generator[_TaskYieldType, None, _T] | t.Awaitable[_T],
+                    **kwargs) -> asyncio.Task[_T]:
+        if 'name' not in kwargs:
+            kwargs['name'] = getattr(coro, '__name__', str(coro))
+
+        kwargs['name'] += f":{self.__registry_key__}"
+
+        task = self.loop.create_task(coro, **kwargs)
+        task.add_done_callback(self._task_cb)
+        self._tasks.append(task)
+        return task

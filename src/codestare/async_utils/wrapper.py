@@ -5,7 +5,7 @@ import typing as t
 from ._typing import _T, _S, _R
 
 
-class CoroutineWrapper(t.Coroutine, t.Generic[_T, _S, _R]):
+class CoroutineWrapper(t.Coroutine[_T, _S, _R]):
     """
     Complex Coroutines are easy to implement with native ``def async`` coroutine syntax, but often require
     some smaller coroutines to compose. Inheriting from CoroutineWrapper, a complex coroutine can encapsulate

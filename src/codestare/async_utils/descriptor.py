@@ -4,12 +4,17 @@ import asyncio
 import typing as t
 from functools import cached_property, partial
 
-from ._typing import _T
+from ._typing import _T, _T_con, _T_cov
+
 
 # pycharm is to stupid to understand this as of now
 # https://youtrack.jetbrains.com/issue/PY-29257
-_fget_type = t.Callable[[], _T]
-_fset_type = t.Callable[[_T], None]
+class _fget_type(t.Protocol[_T_con]):
+    def __call__(self) -> _T_con: ...
+
+
+class _fset_type(t.Protocol[_T_cov]):
+    def __call__(self, value: _T_cov) -> None: ...
 
 
 class accessor(t.Generic[_T]):

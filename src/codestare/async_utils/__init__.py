@@ -6,11 +6,11 @@ from .helper import (
     make_async,
     Registry,
     RegistryMeta,
+    async_exit_on_exc,
 )
 from .wrapper import CoroutineWrapper
 from .nursery import (
     TaskNursery,
-    Sentinel,
 )
 
 __all__ = [
@@ -19,7 +19,7 @@ __all__ = [
     "make_async",
     "CoroutineWrapper",
     "TaskNursery",
-    "Sentinel",
     "RegistryMeta",
-    "Registry"
+    "Registry",
+    "async_exit_on_exc"
 ]
