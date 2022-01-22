@@ -1,23 +1,34 @@
 from __future__ import annotations
 
 import asyncio
-import typing as t
-from functools import cached_property, partial
+from typing import cast, Type, Generic, Any, overload, Tuple, Callable
+
+try:
+    from typing import Protocol
+except ImportError:
+    from typing_extensions import Protocol
+
+from functools import partial
+
+try:
+    from functools import cached_property
+except ImportError:
+    from backports.cached_property import cached_property
 
 from ._typing import _T, _T_con, _T_cov
 
 
 # pycharm is to stupid to understand this as of now
 # https://youtrack.jetbrains.com/issue/PY-29257
-class _fget_type(t.Protocol[_T_con]):
+class _fget_type(Protocol[_T_con]):
     def __call__(self) -> _T_con: ...
 
 
-class _fset_type(t.Protocol[_T_cov]):
+class _fset_type(Protocol[_T_cov]):
     def __call__(self, value: _T_cov) -> None: ...
 
 
-class accessor(t.Generic[_T]):
+class accessor(Generic[_T]):
     """
     The ``get`` coroutine of the accessor takes an optional predicate callable (or None, see below),
     and waits for the predicate result to be truthy, then returns the result of the getter. (see the ``wait_for``
@@ -31,32 +42,32 @@ class accessor(t.Generic[_T]):
     fget: _fget_type[_T]
     fset: _fset_type[_T]
 
-    @t.overload
-    def __init__(self: accessor[t.Any],
+    @overload
+    def __init__(self: accessor[Any],
                  *,
                  funcs: None = ...,
                  condition: asyncio.Condition | None = None,
                  ):
         ...
 
-    @t.overload
+    @overload
     def __init__(self: accessor[_T],
                  *,
                  condition: asyncio.Condition | None = None,
                  ):
         ...
 
-    @t.overload
+    @overload
     def __init__(self: accessor[_T],
                  *,
-                 funcs: t.Tuple[_fget_type[_T], _fset_type[_T]] = ...,
+                 funcs: Tuple[_fget_type[_T], _fset_type[_T]] = ...,
                  condition: asyncio.Condition | None = None,
                  ):
         ...
 
     def __init__(self,
                  *,
-                 funcs: t.Tuple | None = None,
+                 funcs: Tuple | None = None,
                  condition: asyncio.Condition | None = None,
                  ):
         if funcs is None:
@@ -88,7 +99,7 @@ class accessor(t.Generic[_T]):
             self.fset(value)
             self.condition.notify_all()
 
-    async def get(self, *, predicate: t.Callable[[_T], bool] | None = None) -> _T:
+    async def get(self, *, predicate: Callable[[_T], bool] | None = None) -> _T:
         if predicate is None:
             # this predicate returns False, True i.e. it will block once and always return after notify
             _get_value = iter([False, True]).__next__
@@ -104,7 +115,7 @@ class accessor(t.Generic[_T]):
             return self.fget()
 
 
-class condition_property(cached_property, t.Generic[_T]):
+class condition_property(cached_property, Generic[_T]):
     """
     This is a decorator to create a cached ``accessor`` to handle access to some data via a asyncio.Condition
     You can use it like the normal @property decorator, but the result of the lookup (__get__ of the descriptor) will
@@ -114,9 +125,9 @@ class condition_property(cached_property, t.Generic[_T]):
     """
 
     def __init__(self: condition_property[_T],
-                 fget: t.Callable[[t.Any], _T] | None = None,
-                 fset: t.Callable[[t.Any, _T], None] | None = None,
-                 fdel: t.Callable[[t.Any], None] | None = None,
+                 fget: Callable[[Any], _T] | None = None,
+                 fset: Callable[[Any, _T], None] | None = None,
+                 fdel: Callable[[Any], None] | None = None,
                  doc: str | None = None) -> None:
         self.fget = fget
         self.fset = fset
@@ -149,27 +160,27 @@ class condition_property(cached_property, t.Generic[_T]):
     def __set__(self, obj, value: _T):
         raise AttributeError(f"can't set {self.attrname} directly, use set()")
 
-    @t.overload
-    def __get__(self, instance: None, owner: t.Type[t.Any] | None = None) -> condition_property[_T]:
+    @overload
+    def __get__(self, instance: None, owner: Type[Any] | None = None) -> condition_property[_T]:
         ...
 
-    @t.overload
-    def __get__(self, instance: object, owner: t.Type[t.Any] | None = None) -> accessor[_T]:
+    @overload
+    def __get__(self, instance: object, owner: Type[Any] | None = None) -> accessor[_T]:
         ...
 
     def __get__(self, instance: object | None,
-                owner: t.Type[t.Any] | None = None) -> accessor[_T] | condition_property[_T]:
+                owner: Type[Any] | None = None) -> accessor[_T] | condition_property[_T]:
         if instance is None:
-            return t.cast(condition_property[_T], super().__get__(instance, owner))
+            return cast(condition_property[_T], super().__get__(instance, owner))
         else:
-            return t.cast(accessor[_T], super().__get__(instance, owner))
+            return cast(accessor[_T], super().__get__(instance, owner))
 
-    def getter(self: condition_property[_T], fget: t.Callable[[t.Any], _T]) -> condition_property[_T]:
+    def getter(self: condition_property[_T], fget: Callable[[Any], _T]) -> condition_property[_T]:
         prop = type(self)(fget, self.fset, self.fdel, self.__doc__)
         prop.attrname = self.attrname
         return prop
 
-    def setter(self: condition_property[_T], fset: t.Callable[[t.Any, _T], None]) -> condition_property[_T]:
+    def setter(self: condition_property[_T], fset: Callable[[Any, _T], None]) -> condition_property[_T]:
         prop = type(self)(self.fget, fset, self.fdel, self.__doc__)
         prop.attrname = self.attrname
         return prop
