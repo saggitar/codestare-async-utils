@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import weakref
+from collections import ChainMap
+
 import abc
 import asyncio
-import typing as t
-from collections import ChainMap
-from functools import wraps
-
 import sys
+import typing as t
+from functools import wraps
 
 from ._typing import _T, SimpleCoroutine, _S
 
@@ -40,18 +41,24 @@ class RegistryMeta(abc.ABCMeta):
     If the __default_key__ attribute is not present in the instance, it will be copied from the class
     on instance creation, and appended with the number of instances created before.
     """
+    _wrap_marker = object()
 
     @staticmethod
     def _post_new(instance: t.Any):
         cls: RegistryMeta = type(instance)
 
         # we set value in all parents, so they know a new instance is created
+        # we know that the mappings are mutable, so it's ok to set the values.
         for mapping in cls.__created__.maps:
-            mapping[instance.__registry_key__] = instance
+            mapping[instance.__registry_key__] = instance  # type: ignore
 
     @property
     def registry(cls: t.Type[_T]) -> t.Dict[t.Any, _T]:
-        return {instance.__registry_key__: instance for instance in cls.__created__.maps[0].values()}
+        return {
+            instance.__registry_key__: instance
+            for instance in cls.__created__.maps[0].values()
+            if instance is not None  # only live references
+        }
 
     @staticmethod
     def _wrap_new(__new__):
@@ -61,22 +68,26 @@ class RegistryMeta(abc.ABCMeta):
             RegistryMeta._post_new(instance)
             return instance
 
-        wrapped.__is_wrapped__ = True
+        wrap_markers = getattr(wrapped, 'markers', set())
+        wrap_markers.add(RegistryMeta._wrap_marker)
+        wrapped.markers = wrap_markers
+
         return wrapped
 
     def __new__(mcs, name, bases, attrs):
         kls: RegistryMeta = super().__new__(mcs, name, bases, attrs)
 
-        if not hasattr(kls, '__new_is_wrapped__') and not hasattr(kls.__new__, '__is_wrapped__'):
+        wrap_markers = getattr(kls.__new__, 'markers', set())
+        if mcs._wrap_marker not in wrap_markers:
             kls.__new__ = mcs._wrap_new(kls.__new__)
 
         class_namespace = kls.__dict__
 
         if not hasattr(kls, '__created__'):
-            kls.__created__ = ChainMap()
+            kls.__created__ = ChainMap(weakref.WeakValueDictionary())
         else:
             parent = kls.__created__
-            setattr(kls, '__created__', parent.new_child())
+            setattr(kls, '__created__', parent.new_child(weakref.WeakValueDictionary()))
 
         if '__default_key_value__' not in class_namespace:
             kls.__default_key_value__ = f"{attrs['__module__']}.{attrs['__qualname__']}"
@@ -99,16 +110,7 @@ class RegistryMeta(abc.ABCMeta):
 
 
 class Registry(object, metaclass=RegistryMeta):
-    """
-    Set __unique_key_attr__ to change the registry key
-    """
-    __new_is_wrapped__ = True
-
-    def __new__(cls, *args, **kwargs):
-        instance = super().__new__(cls)
-        assert isinstance(instance, Registry)
-        cls._post_new(instance)
-        return instance
+    pass
 
 
 def async_exit_on_exc(ctx_manager: t.AsyncContextManager, task: asyncio.Task, loop: asyncio.BaseEventLoop = None):
