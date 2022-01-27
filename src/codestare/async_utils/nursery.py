@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import traceback
+
 import asyncio
 import logging
 import signal
 import sys
-import traceback
 import typing as t
 from contextlib import AsyncExitStack
 from warnings import warn
@@ -65,10 +66,10 @@ def setup_shutdown_handling(loop):
         )
         [remove_handler(s) for s in _signals]
 
-    def signal_handler(signal, frame):
+    def signal_handler(sig, frame):
         _clear_signal_handlers()
-        kwargs = {} if sys.version_info < (3, 8) else {'name': f'shutdown({signal!r})'}
-        asyncio.create_task(shutdown(loop, signal=signal, frame=frame), **kwargs)
+        kwargs = {} if sys.version_info < (3, 8) else {'name': f'shutdown({sig!r})'}
+        asyncio.create_task(shutdown(loop, signal=sig, frame=frame), **kwargs)
 
     add_handler = (
         signal.signal
@@ -107,7 +108,6 @@ async def shutdown(loop, **kwargs):
         log.debug(f"Sentinel task[s] stopped with result {result!r}")
 
     tasks = get_tasks()
-
     log.info(f"Cancelling {len(tasks)} outstanding tasks")
     for task in tasks:
         await stop_task(task)
