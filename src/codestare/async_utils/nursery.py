@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import traceback
 
 import asyncio
@@ -66,18 +67,13 @@ def setup_shutdown_handling(loop):
         )
         [remove_handler(s) for s in _signals]
 
-    def signal_handler(sig, frame):
-        _clear_signal_handlers()
+    def signal_handler(sig, frame=None):
         kwargs = {} if sys.version_info < (3, 8) else {'name': f'shutdown({sig!r})'}
         asyncio.create_task(shutdown(loop, signal=sig, frame=frame), **kwargs)
 
-    add_handler = (
-        signal.signal
-        if WINDOWS else
-        loop.add_signal_handler
-    )
+    _clear_signal_handlers()
 
-    [add_handler(sig, signal_handler) for sig in _signals]
+    [signal.signal(sig, signal_handler) for sig in _signals]
 
     if not loop.get_exception_handler():
         loop.set_exception_handler(handle_exception)
