@@ -1,32 +1,42 @@
 from __future__ import annotations
 
-import functools
-import traceback
-
 import asyncio
+import contextlib
 import logging
 import signal
 import sys
-import typing as t
-from contextlib import AsyncExitStack
-from warnings import warn
+import traceback
+import warnings
+from typing import (
+    NamedTuple,
+    Type,
+    Set,
+    Optional,
+    Awaitable,
+    List,
+    MutableMapping,
+    Any,
+    Tuple,
+    Callable,
+    Generator,
+)
 
 from ._typing import _T
 from .helper import Registry
 
 log = logging.getLogger(__name__)
 
-_T_ExceptionHandlers = t.MutableMapping[t.Tuple[t.Type[Exception], ...], t.Callable[[Exception], t.Any]]
-_TaskYieldType = t.Optional[asyncio.Future]
+_T_ExceptionHandlers = MutableMapping[Tuple[Type[Exception], ...], Callable[[Exception], Any]]
+_TaskYieldType = Optional[asyncio.Future]
 
 __sentinel_tasks__ = set()
 WINDOWS = sys.platform == 'win32'
 
 
-class ExcInfo(t.NamedTuple):
-    exc_type: t.Type[Exception] | None = None
-    exc: Exception | None = None
-    traceback: t.Any | None = None
+class ExcInfo(NamedTuple):
+    exc_type: Optional[Type[Exception]] = None
+    exc: Optional[Exception] = None
+    traceback: Optional[Any] = None
 
 
 def mark_sentinel_task(task):
@@ -111,8 +121,8 @@ async def shutdown(loop, **kwargs):
     loop.stop()
 
 
-class TaskNursery(AsyncExitStack, Registry):
-    __has_handling__: t.Set[asyncio.BaseEventLoop] = set()
+class TaskNursery(contextlib.AsyncExitStack, Registry):
+    __has_handling__: Set[asyncio.BaseEventLoop] = set()
     __unique_key_attr__ = 'name'
 
     @staticmethod
@@ -128,7 +138,7 @@ class TaskNursery(AsyncExitStack, Registry):
 
     def __init__(self, name=None, loop=None):
         super().__init__()
-        self._tasks: t.List[asyncio.Task] = []
+        self._tasks: List[asyncio.Task] = []
 
         self.exception_handlers: _T_ExceptionHandlers = {}
         self.fallback_handler = log.exception
@@ -181,7 +191,7 @@ class TaskNursery(AsyncExitStack, Registry):
             )
 
     def create_task(self,
-                    coro: t.Generator[_TaskYieldType, None, _T] | t.Awaitable[_T],
+                    coro: Generator[_TaskYieldType, None, _T] | Awaitable[_T],
                     **kwargs) -> asyncio.Task[_T]:
 
         if sys.version_info >= (3, 8):
@@ -190,7 +200,7 @@ class TaskNursery(AsyncExitStack, Registry):
             kwargs['name'] += f":{self.__registry_key__}"
         else:
             if kwargs.pop('name', None):
-                warn(f"No `name` argument in {sys.version}")
+                warnings.warn(f"No `name` argument in {sys.version}")
 
         task = self.loop.create_task(coro, **kwargs)
         task.add_done_callback(self._task_cb)
