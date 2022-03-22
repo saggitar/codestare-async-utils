@@ -79,7 +79,13 @@ def setup_shutdown_handling(loop):
 
     def signal_handler(sig, frame=None):
         kwargs = {} if sys.version_info < (3, 8) else {'name': f'shutdown({sig!r})'}
-        asyncio.create_task(shutdown(loop, signal=sig, frame=frame), **kwargs)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError as e:
+            warnings.warn(f"Can't create shutdown task - {e}")
+        else:
+            loop.create_task(shutdown(loop, signal=sig, frame=frame), **kwargs)
+
 
     _clear_signal_handlers()
 
