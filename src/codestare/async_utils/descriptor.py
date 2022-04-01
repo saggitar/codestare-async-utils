@@ -1,75 +1,137 @@
 from __future__ import annotations
 
 import asyncio
-from typing import cast, Type, Generic, Any, overload, Tuple, Callable
+import typing
 
 try:
     from typing import Protocol
 except ImportError:
     from typing_extensions import Protocol
 
-from functools import partial
+import functools
 
 try:
     from functools import cached_property
 except ImportError:
     from backports.cached_property import cached_property
 
-from ._typing import _T, _T_con, _T_cov
+from .type_vars import T_co, T, T_contra
 
 
 # pycharm is to stupid to understand this as of now
 # https://youtrack.jetbrains.com/issue/PY-29257
-class _fget_type(Protocol[_T_con]):
-    def __call__(self) -> _T_con: ...
+class fget_type(Protocol[T_contra]):
+    def __call__(self) -> T_contra:
+        """
+        :class:`fget_type` callables need to have this signature
+        """
 
 
-class _fset_type(Protocol[_T_cov]):
-    def __call__(self, value: _T_cov) -> None: ...
+class fset_type(Protocol[T_co]):
+    def __call__(self, value: T_co) -> None:
+        """
+        :class:`fset_type` callables need to have this signature
+        """
 
 
-class accessor(Generic[_T]):
+class accessor(typing.Generic[T]):
     """
-    The ``get`` coroutine of the accessor takes an optional predicate callable (or None, see below),
-    and waits for the predicate result to be truthy, then returns the result of the getter. (see the ``wait_for``
-    documentation of asyncio.Condition for more info on the predicate callable).
-    The default predicate (used when ``predicate=None``) returns [False, True, True, ...], so ``get`` blocks once,
-    until it is notified from a ``set`` and then does not block again.
-    Passing ``predicate=(lambda: True)`` will make ``get`` not block at all.
+    An accessor provides easy shared access to a resource and
 
-    The ``set`` coroutine of the accessor sets the value and notifies every ``get``.
+    Example:
+
+        In the simplest case, an accessor synchronizes reads and writes out of the box ::
+
+            >>> import asyncio
+            >>> from codestare.async_utils import accessor
+            >>> foo = accessor()
+            >>> async def wait_for_write(accessor_):
+            ...     print(await accessor_.get())
+            ...
+            >>> background = asyncio.create_task(wait_for_write(foo))
+            >>> await foo.set("Bar")
+            Bar
+
+        It's possible to use custom getters / setter e.g. create an :class:`accessor` to the value managed
+        by a normal property if one needs shared access as well ::
+
+            >>> class Thing:
+            ...     def __init__(self):
+            ...         self._value = None
+            ...     @property
+            ...     def value(self):
+            ...         return self._value
+            ...     @value.setter
+            ...     def value(self, val):
+            ...         if not val:
+            ...             raise ValueError(f"Illegal value {val}")
+            ...         self._value = val
+            ...
+            >>> thing = Thing()
+            >>> thing.value = 3
+            >>> thing.value
+            3
+            >>> thing.value = 0
+            ValueError: Illegal value 0
+            >>> class BetterThing(Thing):
+            ...     def __init__(self):
+            ...         super().__init__()
+            ...         self.value_accessor = accessor(funcs=(
+            ...             type(self).value.fget.__get__(self),
+            ...             type(self).value.fset.__get__(self)
+            ...         ))
+            ...
+            >>> better_thing = BetterThing()
+            >>> background = asyncio.create_task(wait_for_write(better_thing.value_accessor))
+            >>> await better_thing.value_accessor.set(3)
+            3
+            >>> better_thing.value
+            3
+            >>> await better_thing.value_accessor.set(0)
+            ValueError: Illegal value 0
+
+    See Also:
+        :class:`condition_property` -- decorator to create `accessor properties` more easily
+
     """
-    fget: _fget_type[_T]
-    fset: _fset_type[_T]
+    fget: 'fget_type[T]'
+    fset: 'fset_type[T]'
 
-    @overload
-    def __init__(self: accessor[Any],
+    @typing.overload
+    def __init__(self: accessor[typing.Any],
                  *,
                  funcs: None = ...,
                  condition: asyncio.Condition | None = None,
                  ):
         ...
 
-    @overload
-    def __init__(self: accessor[_T],
+    @typing.overload
+    def __init__(self: accessor[T],
                  *,
                  condition: asyncio.Condition | None = None,
                  ):
         ...
 
-    @overload
-    def __init__(self: accessor[_T],
+    @typing.overload
+    def __init__(self: accessor[T],
                  *,
-                 funcs: Tuple[_fget_type[_T], _fset_type[_T]] = ...,
+                 funcs: typing.Tuple[fget_type[T], fset_type[T]] = ...,
                  condition: asyncio.Condition | None = None,
                  ):
         ...
 
     def __init__(self,
                  *,
-                 funcs: Tuple | None = None,
+                 funcs: typing.Tuple | None = None,
                  condition: asyncio.Condition | None = None,
                  ):
+        """
+        Args:
+            funcs: getter and setter for some value -- `optional`, if not passed get / set a private field of the
+                object
+            condition: condition to synchronize access to the value -- `optional`, if not passed a new condition
+                is created
+        """
         if funcs is None:
             def set(instance, value):
                 instance._value = value
@@ -87,19 +149,58 @@ class accessor(Generic[_T]):
             fget, fset = funcs
 
         self.fset = fset
+        """
+        Setter, either passed via ``funcs`` argument, or a setter of an internal value if no ``funcs`` where passed
+        """
         self.fget = fget
+        """
+        Getter, either passed via ``funcs`` argument, or a getter of an internal value if no ``funcs`` where passed
+        """
         self.condition = condition or asyncio.Condition()
+        """
+        Used to synchronized access, either passed via ``condition`` argument, or a new condition created specifically
+        for this accessor
+        """
 
     @property
-    def value(self) -> _T | None:
+    def value(self) -> T | None:
+        """
+        Simple access to the value produced by :attr:`.fget` without async locks i.e. not safe if you did not
+        acquire the lock of :attr:`.condition`
+        """
         return self.fget()
 
-    async def set(self, value: _T):
+    async def set(self, value: T) -> None:
+        """
+        Sets the value (using :attr:`.fset`) and notifies every coroutine waiting on the :attr:`.condition` (e.g.
+        :meth:`.get`
+
+        Args:
+            value: new value passed to :attr:`.fset`
+        """
         async with self.condition:
             self.fset(value)
             self.condition.notify_all()
 
-    async def get(self, *, predicate: Callable[[_T], bool] | None = None) -> _T:
+    async def get(self, *, predicate: typing.Callable[[T], bool] | None = None) -> T:
+        """
+        Shared access to value produced by :attr:`.fget`
+
+        Args:
+            predicate: waits for the predicate result to be truthy, then returns the result of :attr:`.fget`.
+                The default predicate (used when ``predicate=None``) returns ``[False, True, True, ...]``, so
+                :meth:`.get` blocks once, until it is notified from a :meth:`.set` and then does not block again.
+                Passing ``predicate=(lambda: True)`` will make :meth:`.get` not block at all.
+
+        Returns:
+            value produced by :attr:`.fget`
+
+        Raises:
+            ValueError: if ``predicate`` is not a callable
+
+        See Also:
+            :meth:`asyncio.Condition.wait_for` -- used to wait for internal condition
+        """
         if predicate is None:
             # this predicate returns False, True i.e. it will block once and always return after notify
             _get_value = iter([False, True]).__next__
@@ -115,19 +216,23 @@ class accessor(Generic[_T]):
             return self.fget()
 
 
-class condition_property(cached_property, Generic[_T]):
+class condition_property(cached_property, typing.Generic[T]):
     """
-    This is a decorator to create a cached ``accessor`` to handle access to some data via a asyncio.Condition
-    You can use it like the normal @property decorator, but the result of the lookup (__get__ of the descriptor) will
-    be an ``accessor`` with coroutine attributes to handle safely setting and getting the value (from the objects
-    methods passed via ``setter`` and ``getter`` , like in normal properties) by means of a condition.
+    This is a decorator to create a cached :class:`accessor` to handle access to some data via a
+    :class:`asyncio.Condition`.
 
+    You can use it like the normal `@property` decorator, but the result of the lookup (`__get__` of the descriptor)
+    will be an :class:`accessor` with coroutine attributes to handle safely setting and getting the value
+    (from the objects methods passed via ``setter`` and ``getter``, like in normal properties) by means of a condition.
+
+    See Also:
+        :class:`accessor` -- how to access the value
     """
 
-    def __init__(self: condition_property[_T],
-                 fget: Callable[[Any], _T] | None = None,
-                 fset: Callable[[Any, _T], None] | None = None,
-                 fdel: Callable[[Any], None] | None = None,
+    def __init__(self: condition_property[T],
+                 fget: typing.Callable[[typing.Any], T] | None = None,
+                 fset: typing.Callable[[typing.Any, T], None] | None = None,
+                 fdel: typing.Callable[[typing.Any], None] | None = None,
                  doc: str | None = None) -> None:
         self.fget = fget
         self.fset = fset
@@ -138,12 +243,12 @@ class condition_property(cached_property, Generic[_T]):
 
         super().__init__(self._create_accessor)
 
-    def _create_accessor(self: 'condition_property[_T]', obj: object) -> accessor[_T]:
+    def _create_accessor(self: 'condition_property[T]', obj: object) -> accessor[T]:
         return accessor(
-            funcs=(partial(self._get, obj), partial(self._set, obj),)
+            funcs=(functools.partial(self._get, obj), functools.partial(self._set, obj),)
         )
 
-    def _set(self, obj: object, value: _T):
+    def _set(self, obj: object, value: T):
         if self.fset is None:
             raise AttributeError(f"can't set attribute {self.attrname}")
         self.fset(obj, value)
@@ -157,35 +262,47 @@ class condition_property(cached_property, Generic[_T]):
 
         return self.fget(obj)
 
-    def __set__(self, obj, value: _T):
+    def __set__(self, obj, value: T):
         raise AttributeError(f"can't set {self.attrname} directly, use set()")
 
-    @overload
-    def __get__(self, instance: None, owner: Type[Any] | None = None) -> condition_property[_T]:
+    @typing.overload
+    def __get__(self, instance: None, owner: typing.Type[typing.Any] | None = None) -> condition_property[T]:
         ...
 
-    @overload
-    def __get__(self, instance: object, owner: Type[Any] | None = None) -> accessor[_T]:
+    @typing.overload
+    def __get__(self, instance: object, owner: typing.Type[typing.Any] | None = None) -> accessor[T]:
         ...
 
     def __get__(self, instance: object | None,
-                owner: Type[Any] | None = None) -> accessor[_T] | condition_property[_T]:
+                owner: typing.Type[typing.Any] | None = None) -> accessor[T] | condition_property[T]:
         if instance is None:
-            return cast(condition_property[_T], super().__get__(instance, owner))
+            return typing.cast(condition_property[T], super().__get__(instance, owner))
         else:
-            return cast(accessor[_T], super().__get__(instance, owner))
+            return typing.cast(accessor[T], super().__get__(instance, owner))
 
-    def getter(self: condition_property[_T], fget: Callable[[Any], _T]) -> condition_property[_T]:
+    def getter(self: condition_property[T], fget: typing.Callable[[typing.Any], T]) -> condition_property[T]:
+        """
+        This is a cached property but uses the same interface as a normal :obj:`property`.
+        See example of :obj:`property` documentation on how to use.
+        """
         prop = type(self)(fget, self.fset, self.fdel, self.__doc__)
         prop.attrname = self.attrname
         return prop
 
-    def setter(self: condition_property[_T], fset: Callable[[Any, _T], None]) -> condition_property[_T]:
+    def setter(self: condition_property[T], fset: typing.Callable[[typing.Any, T], None]) -> condition_property[T]:
+        """
+        This is a cached property but uses the same interface as a normal :obj:`property`.
+        See example of :obj:`property` documentation on how to use.
+        """
         prop = type(self)(self.fget, fset, self.fdel, self.__doc__)
         prop.attrname = self.attrname
         return prop
 
-    def deleter(self: condition_property[_T], fdel) -> condition_property[_T]:
+    def deleter(self: condition_property[T], fdel) -> condition_property[T]:
+        """
+        This is a cached property but uses the same interface as a normal :obj:`property`.
+        See example of :obj:`property` documentation on how to use.
+        """
         prop = type(self)(self.fget, self.fset, fdel, self.__doc__)
         prop.attrname = self.attrname
         return prop

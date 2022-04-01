@@ -6,46 +6,63 @@ import logging
 import signal
 import sys
 import traceback
+import typing
 import warnings
-from typing import (
-    NamedTuple,
-    Type,
-    Set,
-    Optional,
-    Awaitable,
-    List,
-    MutableMapping,
-    Any,
-    Tuple,
-    Callable,
-    Generator,
-)
 
-from ._typing import _T
-from .helper import Registry
+from . import helper
+from .type_vars import T
 
 log = logging.getLogger(__name__)
 
-_T_ExceptionHandlers = MutableMapping[Tuple[Type[Exception], ...], Callable[[Exception], Any]]
-_TaskYieldType = Optional[asyncio.Future]
+_TaskYieldType = typing.Optional[asyncio.Future]
 
 __sentinel_tasks__ = set()
 WINDOWS = sys.platform == 'win32'
 
 
-class ExcInfo(NamedTuple):
-    exc_type: Optional[Type[Exception]] = None
-    exc: Optional[Exception] = None
-    traceback: Optional[Any] = None
+class ExcInfo(typing.NamedTuple):
+    """
+    As returned by :func:`sys.exc_info`
+    """
+    exc_type: typing.Optional[typing.Type[Exception]] = None
+    exc: typing.Optional[Exception] = None
+    traceback: typing.Optional[typing.Any] = None
 
 
-def mark_sentinel_task(task):
+def mark_sentinel_task(task: asyncio.Task) -> asyncio.Task:
+    """
+    The package keeps a global reference to all tasks marked as a `sentinel task` i.e. they
+    will not be garbage collected even if they are finished. Those tasks will be stopped before
+    other tasks if you set up the shutdown handling with this module. These tasks are
+    used by the :class:`TaskNursery` to trigger the nursery's shutdown by simply
+    canceling / stopping the :attr:`~TaskNursery.sentinel_task`.
+
+    When a :func:`shutdown` task is created (e.g. when a specific signal is received), all sentinel tasks
+    will be stopped first -- this will trigger the shutdown of all :class:`TaskNurserys <TaskNursery>` that were
+    created in the running interpreter.
+
+    Args:
+        task: will be globally referenced to be shut down eventually
+
+    Returns:
+        the task
+    """
     global __sentinel_tasks__
     __sentinel_tasks__.add(task)
     return task
 
 
-def handle_exception(loop: asyncio.BaseEventLoop, context):
+def handle_exception(loop: asyncio.AbstractEventLoop, context) -> None:
+    """
+    Calls the loops default exception handler, then creates a :func:`shutdown` task for the loop.
+    This is the default exception handler that is set up for a loop with :func:`setup_shutdown_handling` if
+    no other specific exception handler is set.
+
+    Args:
+        loop: event loop to shut down
+        context: meta information for :func:`shutdown` task
+
+    """
     # context["message"] will always be there; but context["exception"] may not
     loop.default_exception_handler(context)
 
@@ -54,11 +71,23 @@ def handle_exception(loop: asyncio.BaseEventLoop, context):
     log.info("Shutting down...")
 
     additional_args = {'name': f"shutdown({context['message']})"} if sys.version_info >= (3, 8) else {}
-
     asyncio.create_task(shutdown(loop, context=context), **additional_args)
 
 
-async def stop_task(task: asyncio.Task):
+async def stop_task(task: asyncio.Task) -> typing.Any:
+    """
+    Try to cancel the task, and await it -- returns possible exceptions raised inside the task, e.g. the
+    :class:`asyncio.CancelledError` raised by canceling the task prematurely.
+
+    Args:
+        task: task to stop, can't be the current running task
+
+    Returns:
+        result of task
+
+    Raises:
+        ValueError: if the currently running task is passed
+    """
     if task is asyncio.current_task():
         raise ValueError(f"Not allowed to stop task running `stop_task`!")
 
@@ -66,7 +95,22 @@ async def stop_task(task: asyncio.Task):
     return (await asyncio.gather(task, return_exceptions=True))[0]
 
 
-def setup_shutdown_handling(loop):
+def setup_shutdown_handling(loop: asyncio.AbstractEventLoop) -> None:
+    """
+    Add signal handling and exception handling for the loop.
+    On Windows only :obj:`signal.SIGBREAK` and :obj:`signal.SIGINT` are usable, on Linux add handling for
+    :obj:`signal.SIGHUP`, :obj:`signal.SIGTERM` and :obj:`signal.SIGINT`.
+
+    Uses normal signal handlers using :mod:`signal` except of :func:`asyncio.loop.add_signal_handler` since the
+    latter is not available on Windows systems.
+
+    The signal handlers registered start a :func:`shutdown` task for the passed ``loop``.
+    Also sets :func:`handle_exception` as the loop's exception handler if no other handler is already set.
+
+    Args:
+        loop: event loop
+
+    """
     _signals = (signal.SIGBREAK, signal.SIGINT) if WINDOWS else (signal.SIGHUP, signal.SIGTERM, signal.SIGINT)
 
     def _clear_signal_handlers():
@@ -86,7 +130,6 @@ def setup_shutdown_handling(loop):
         else:
             loop.create_task(shutdown(loop, signal=sig, frame=frame), **kwargs)
 
-
     _clear_signal_handlers()
 
     [signal.signal(sig, signal_handler) for sig in _signals]
@@ -95,7 +138,26 @@ def setup_shutdown_handling(loop):
         loop.set_exception_handler(handle_exception)
 
 
-async def shutdown(loop, **kwargs):
+async def shutdown(loop: asyncio.AbstractEventLoop, **kwargs) -> None:
+    """
+    Await shutdown of the loop.
+
+    If the :func:`shutdown` task is triggered by an exception from a task managed by a :class:`TaskNursery`, the
+    ``**kwargs`` will contain a reference to the nursery's :attr:`~TaskNursery.sentinel_task` in the ``context``
+    argument. If this is the case, this sentinel task will be stopped (using :func:`stop_task`) which triggers
+    trigger the shutdown handling of the :class:`TaskNursery`.
+
+    If the :func:`shutdown` task is triggered by a signal handler, all tasks
+    :func:`marked as sentinel tasks <mark_sentinel_task>` will be stopped first, instead.
+
+    Finally all tasks still running in the ``loop`` will be stopped.
+    Then the loop will be :meth:`stopped <asyncio.loop.stop>`.
+
+    Args:
+        loop: event loop that needs to be stopped
+        **kwargs: meta information like received signal or exception context
+
+    """
     sig = kwargs.pop('signal', None)
 
     if sig:
@@ -127,8 +189,40 @@ async def shutdown(loop, **kwargs):
     loop.stop()
 
 
-class TaskNursery(contextlib.AsyncExitStack, Registry):
-    __has_handling__: Set[asyncio.BaseEventLoop] = set()
+class TaskNursery(contextlib.AsyncExitStack, helper.Registry):
+    """
+    Use a :class:`TaskNursery` to create and manage tasks, instead of using the :meth:`asyncio.loop.create_task`
+    method directly.
+
+    All tasks created by a nursery receive a callback to execute when they finish, which will trigger
+    a graceful shutdown of the event loop if necessary -- this saves a lot of boilerplate code
+
+    Basically, a :class:`TaskNursery` is a :class:`contextlib.AsyncExitStack` that gets closed when it's
+    :attr:`~.sentinel_task` is cancelled. This means you can enter any number of async context managers
+    with a nursery, and every one of them will be closed when the nursery shuts down.
+
+    Creating a :class:`TaskNursery` for an event loop also sets up signal handling and exception handling
+    for that loop, i.e. if a loop has an active :class:`TaskNursery` exiting the interpreter forcefully (e.g.
+    ``Ctrl+C`` in the shell) will gracefully shut down all nurseries first.
+
+    :class:`TaskNursery` is a :class:`~codestare.async_utils.helper.Registry`
+    with unique attribute :attr:`~TaskNursery.name` by default, i.e. all instances need to have a unique name
+    and can be referenced by name using the :attr:`TaskNursery.registry` ::
+
+        >>> from codestare.async_utils import TaskNursery
+        >>> import asyncio
+        >>> loop = asyncio.get_event_loop_policy().get_event_loop()
+        >>> nursery = TaskNursery(name="Foo", loop=loop)
+        >>> TaskNursery.registry
+        {'Foo': codestare.async_utils.nursery.TaskNursery(name='Foo', loop=<...>)}
+
+
+    Attributes:
+
+        registry: Inherited from :class:`codestare.async_utils.helper.Registry`
+
+    """
+    __has_handling__: typing.Set[asyncio.BaseEventLoop] = set()
     __unique_key_attr__ = 'name'
 
     @staticmethod
@@ -144,9 +238,8 @@ class TaskNursery(contextlib.AsyncExitStack, Registry):
 
     def __init__(self, name=None, loop=None):
         super().__init__()
-        self._tasks: List[asyncio.Task] = []
+        self._tasks: typing.List[asyncio.Task] = []
 
-        self.exception_handlers: _T_ExceptionHandlers = {}
         self.fallback_handler = log.exception
         self.loop = loop or asyncio.get_running_loop()
 
@@ -160,6 +253,10 @@ class TaskNursery(contextlib.AsyncExitStack, Registry):
         )
         self.sentinel_task.remove_done_callback(self._task_cb)
         self.name = name or f'TaskNursery-{len(type(self).registry)}'
+
+    @property
+    def tasks(self):
+        return self._tasks
 
     async def _sentinel_task(self, event):
         try:
@@ -197,8 +294,8 @@ class TaskNursery(contextlib.AsyncExitStack, Registry):
             )
 
     def create_task(self,
-                    coro: Generator[_TaskYieldType, None, _T] | Awaitable[_T],
-                    **kwargs) -> asyncio.Task[_T]:
+                    coro: typing.Generator[_TaskYieldType, None, T] | typing.Awaitable[T],
+                    **kwargs) -> asyncio.Task[T]:
 
         if sys.version_info >= (3, 8):
             if 'name' not in kwargs:
@@ -212,3 +309,11 @@ class TaskNursery(contextlib.AsyncExitStack, Registry):
         task.add_done_callback(self._task_cb)
         self._tasks.append(task)
         return task
+
+    def __repr__(self):
+        kls = self.__class__
+        attrs = ['name', 'loop']
+
+        return (f"{kls.__module__}.{kls.__qualname__}("
+                f"{', '.join('{}={!r}'.format(name, getattr(self, name, None)) for name in attrs)}"
+                f")")
