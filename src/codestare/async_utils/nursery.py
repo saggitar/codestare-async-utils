@@ -224,13 +224,36 @@ class TaskNursery(contextlib.AsyncExitStack, helper.Registry):
     """
     __has_handling__: typing.Set[asyncio.BaseEventLoop] = set()
     __unique_key_attr__ = 'name'
+    """
+    Defines which attribute of the nursery instances is used as unique key for registry mapping
+    """
 
     @staticmethod
-    def add_shutdown_handling(loop):
+    def add_shutdown_handling(loop: asyncio.AbstractEventLoop) -> None:
+        """
+        Add shutdown handling to the loop, once.
+        Caches loops that were passed as argument to this method, additional calls with the
+        same loop will be ignored.
+
+        Args:
+            loop: gets shutdown handling applied with :func:`setup_shutdown_handling`
+
+        """
         if loop not in TaskNursery.__has_handling__:
             setup_shutdown_handling(loop)
 
-    def stop_task(self, task):
+    def stop_task(self, task: asyncio.Task):
+        """
+        Try to stop a task managed by this nursery using :func:`stop_task`
+
+        Args:
+            task: should be stopped
+
+        Returns:
+            result of :func:`stop_task`
+        Raises:
+            ValueError: if the task is not managed by this nursery i.e. it was not created by :meth:`.create_task`
+        """
         if task not in self._tasks:
             raise ValueError(f"{task} not contained in pending tasks of {self}")
 
@@ -241,8 +264,13 @@ class TaskNursery(contextlib.AsyncExitStack, helper.Registry):
         self._tasks: typing.List[asyncio.Task] = []
 
         self.fallback_handler = log.exception
+        """
+        Default exception handler, :func:`logging.Logger.exception` by default
+        """
         self.loop = loop or asyncio.get_running_loop()
-
+        """
+        Event loop instance to start tasks in, either passed as ``loop`` or current running loop
+        """
         # teardown behaviour
         self.push_async_callback(self._stop_all)
         self.add_shutdown_handling(self.loop)
@@ -251,11 +279,22 @@ class TaskNursery(contextlib.AsyncExitStack, helper.Registry):
                 self._sentinel_task(event=asyncio.Event()),  # dummy event which is never set
             )
         )
+        """
+        Dummy task that does nothing but cancelling it triggers the closing of this :class:`TaskNursery` i.e.
+        all entered async contexts will be closed and all created tasks will be stopped.
+        """
         self.sentinel_task.remove_done_callback(self._task_cb)
         self.name = name or f'TaskNursery-{len(type(self).registry)}'
+        """
+        Unique name of nursery, used as :class:`~codestare.async_utils.Registry` key by default, see
+        :attr:`.__unique_key_attr__`
+        """
 
     @property
     def tasks(self):
+        """
+        Reference to managed tasks
+        """
         return self._tasks
 
     async def _sentinel_task(self, event):
@@ -296,6 +335,21 @@ class TaskNursery(contextlib.AsyncExitStack, helper.Registry):
     def create_task(self,
                     coro: typing.Generator[_TaskYieldType, None, T] | typing.Awaitable[T],
                     **kwargs) -> asyncio.Task[T]:
+        """
+        Tasks created with this method have a callback which runs when the task finishes and tries to retrieve
+        the task result. If the task raised an error the :attr:`loops <.loop>` exception handler is called with
+        the exception info and a reference to this nursery's :attr:`.sentinel_task`. Typically, the exception
+        handler is :func:`handle_exception` (it is set as exception handler when the :class:`TaskNursery` is
+        created for a loop without specific exception handler). It will cancel the `sentinel task` and
+        trigger the nursery's shutdown.
+
+        Args:
+            coro: Coroutine which should run inside the task
+            **kwargs: passed to :meth:`asyncio.loop.create_task`
+
+        Returns:
+            reference to created task
+        """
 
         if sys.version_info >= (3, 8):
             if 'name' not in kwargs:
