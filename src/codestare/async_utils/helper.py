@@ -196,3 +196,67 @@ def async_exit_on_exc(ctx_manager: typing.AsyncContextManager, task: asyncio.Tas
     except:  # noqa
         exc_info = sys.exc_info()
         loop.call_soon(ctx_manager.__aexit__(*exc_info).__await__().__next__)
+
+
+class awaitable_predicate:
+    """
+    Typically, to let an ``async`` coroutine wait until some predicate is `True`, one uses a :class:`asyncio.Condition`.
+    :meth:`Condition.wait_for(predicate) <asyncio.Condition.wait_for>` will block the coroutine until the ``predicate``
+    returns `True` -- ``predicate`` will be reevaluated every time the condition
+    :meth:`notifies <asyncio.Condition.notify>` waiting coroutines.
+
+    An :class:`awaitable_predicate` object does exactly that, but it can also be evaluated to a boolean to make
+    code more concise
+
+    Example:
+
+        >>> from codestare.async_utils import awaitable_predicate
+        >>> value = 0
+        >>> is_zero = awaitable_predicate(lambda: value == 0)
+        >>> bool(is_zero)
+        True
+        >>> value = 1
+        >>> bool(is_zero)
+        False
+
+        Or we can `wait` until the predicate is actually `True`
+
+        >>> [...]  # continued from above
+        >>> async def set_value(number):
+        ...     global value
+        ...     async with is_zero.condition:
+        ...             value = number
+        ...             is_zero.condition.notify()
+        ...
+        >>> async def wait_for_zero():
+        ...     await is_zero
+        ...     print(f"Finally! value: {value}")
+        ...
+        >>> import asyncio
+        >>> async def main():
+        ...     asyncio.create_task(wait_for_zero())
+        ...     for n in reversed(range(3)):
+        ...             await set_value(n)
+        ...
+        >>> asyncio.run(main())
+        Finally! value: 0
+
+    """
+
+    def __init__(self, predicate: typing.Callable[[], bool], condition: asyncio.Condition | None = None):
+        self.condition = condition or asyncio.Condition()
+        self.predicate = predicate
+        self.waiting = None
+
+    async def _waiter(self):
+        async with self.condition:
+            await self.condition.wait_for(self.predicate)
+
+    def __await__(self):
+        if self.waiting is None:
+            self.waiting = self._waiter()
+
+        return self.waiting.__await__()
+
+    def __bool__(self):
+        return self.predicate()

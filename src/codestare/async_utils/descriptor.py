@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import warnings
+
+import collections
+
 import asyncio
 import typing
 
@@ -15,6 +19,7 @@ try:
 except ImportError:
     from backports.cached_property import cached_property
 
+from . import helper
 from .type_vars import T_co, T, T_contra
 
 
@@ -61,7 +66,7 @@ class accessor(typing.Generic[T]):
             ...     @property
             ...     def value(self):
             ...         return self._value
-            ...     @value.setter
+            ...     @value._setter
             ...     def value(self, val):
             ...         if not val:
             ...             raise ValueError(f"Illegal value {val}")
@@ -156,7 +161,7 @@ class accessor(typing.Generic[T]):
         """
         Getter, either passed via ``funcs`` argument, or a getter of an internal value if no ``funcs`` where passed
         """
-        self.condition = condition or asyncio.Condition()
+        self.condition: asyncio.Condition = condition or asyncio.Condition()
         """
         Used to synchronized access, either passed via ``condition`` argument, or a new condition created specifically
         for this accessor
@@ -181,6 +186,20 @@ class accessor(typing.Generic[T]):
         async with self.condition:
             self.fset(value)
             self.condition.notify_all()
+
+    @property
+    def has_waiter(self):
+        waiters: collections.deque = getattr(self.condition, '_waiters', None)
+        if waiters is None:
+            warnings.warn(f"has_waiter relies on a private attribute of asyncio.Condition which"
+                          f" cannot be accessed. Please report this. Until this has been addressed"
+                          f" has_waiters will always assume waiters, which might lead to unexpected behaviour.")
+
+            predicate = lambda: True
+        else:
+            predicate = functools.partial(bool, waiters)
+
+        return helper.awaitable_predicate(predicate=predicate, condition=self.condition)
 
     async def get(self, *, predicate: typing.Callable[[T], bool] | None = None) -> T:
         """
@@ -211,8 +230,12 @@ class accessor(typing.Generic[T]):
         if not callable(predicate):
             raise ValueError(f"{predicate} is not callable")
 
+        def notifying_predicate(acc: accessor):
+            acc.has_waiter.condition.notify_all()
+            return predicate(acc.fget())
+
         async with self.condition:
-            await self.condition.wait_for(lambda: predicate(self.fget()))
+            await self.condition.wait_for(notifying_predicate.__get__(self, None))
             return self.fget()
 
 

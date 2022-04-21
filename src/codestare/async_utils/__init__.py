@@ -4,6 +4,7 @@ from .descriptor import (
 )
 from .helper import (
     make_async,
+    awaitable_predicate,
     Registry,
     RegistryMeta,
     async_exit_on_exc,
@@ -21,5 +22,6 @@ __all__ = [
     "TaskNursery",
     "RegistryMeta",
     "Registry",
-    "async_exit_on_exc"
+    "async_exit_on_exc",
+    "awaitable_predicate"
 ]
