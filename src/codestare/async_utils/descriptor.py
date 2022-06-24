@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import warnings
-
-import collections
-
 import asyncio
+import collections
 import typing
+import warnings
 
 try:
     from typing import Protocol
@@ -107,6 +105,7 @@ class accessor(typing.Generic[T]):
                  *,
                  funcs: None = ...,
                  condition: asyncio.Condition | None = None,
+                 name: str = None
                  ):
         ...
 
@@ -114,6 +113,7 @@ class accessor(typing.Generic[T]):
     def __init__(self: accessor[T],
                  *,
                  condition: asyncio.Condition | None = None,
+                 name: str = None
                  ):
         ...
 
@@ -122,6 +122,7 @@ class accessor(typing.Generic[T]):
                  *,
                  funcs: typing.Tuple[fget_type[T], fset_type[T]] = ...,
                  condition: asyncio.Condition | None = None,
+                 name: str = None
                  ):
         ...
 
@@ -129,6 +130,7 @@ class accessor(typing.Generic[T]):
                  *,
                  funcs: typing.Tuple | None = None,
                  condition: asyncio.Condition | None = None,
+                 name: str = None
                  ):
         """
         Args:
@@ -166,6 +168,10 @@ class accessor(typing.Generic[T]):
         Used to synchronized access, either passed via ``condition`` argument, or a new condition created specifically
         for this accessor
         """
+        self.name = name
+        """
+        For debug purposes
+        """
 
     @property
     def value(self) -> T | None:
@@ -201,7 +207,10 @@ class accessor(typing.Generic[T]):
 
         return helper.awaitable_predicate(predicate=predicate, condition=self.condition)
 
-    async def get(self, *, predicate: typing.Callable[[T], bool] | None = None) -> T:
+    async def get(self,
+                  *,
+                  predicate: typing.Callable[[T], bool] | None = None,
+                  await_next_write: bool = False) -> T:
         """
         Shared access to value produced by :attr:`.fget`
 
@@ -210,6 +219,9 @@ class accessor(typing.Generic[T]):
                 The default predicate (used when ``predicate=None``) returns ``[False, True, True, ...]``, so
                 :meth:`.get` blocks once, until it is notified from a :meth:`.set` and then does not block again.
                 Passing ``predicate=(lambda: True)`` will make :meth:`.get` not block at all.
+            await_next_write: if set to ``True``, and a predicate is passed, the predicate will only be applied
+                once the default predicate (see above) also returns ``True`` i.e. you get the next value that matches
+                the predicate, even if the current value also matches -- **optional**
 
         Returns:
             value produced by :attr:`.fget`
@@ -220,23 +232,30 @@ class accessor(typing.Generic[T]):
         See Also:
             :meth:`asyncio.Condition.wait_for` -- used to wait for internal condition
         """
-        if predicate is None:
-            # this predicate returns False, True i.e. it will block once and always return after notify
-            _get_value = iter([False, True]).__next__
-            predicate = (
-                lambda _: _get_value()
-            )
+        if predicate is None and not await_next_write:
+            await_next_write = True
 
-        if not callable(predicate):
+        # this predicate returns False, True i.e. it will block once and always return after notify
+        wait_predicate = iter([False, True]).__next__ if await_next_write else None
+
+        if predicate is not None and not callable(predicate):
             raise ValueError(f"{predicate} is not callable")
 
         def notifying_predicate(acc: accessor):
             acc.has_waiter.condition.notify_all()
-            return predicate(acc.fget())
+
+            use_value = True if not wait_predicate else wait_predicate()
+            matching_value = True if not predicate else predicate(acc.fget())
+            return use_value and matching_value
 
         async with self.condition:
             await self.condition.wait_for(notifying_predicate.__get__(self, None))
             return self.fget()
+
+    def __repr__(self):
+        params = {param: getattr(self, param, None) for param in ['name', 'fget', 'fset']}
+        return (f"<{self.__class__.__name__} object "
+                f"[{', '.join('{}={!r}'.format(name, value) for name, value in params.items())}]>")
 
 
 class condition_property(cached_property, typing.Generic[T]):
@@ -268,7 +287,7 @@ class condition_property(cached_property, typing.Generic[T]):
 
     def _create_accessor(self: 'condition_property[T]', obj: object) -> accessor[T]:
         return accessor(
-            funcs=(functools.partial(self._get, obj), functools.partial(self._set, obj),)
+            funcs=(functools.partial(self._get, obj), functools.partial(self._set, obj),), name=self.attrname
         )
 
     def _set(self, obj: object, value: T):
