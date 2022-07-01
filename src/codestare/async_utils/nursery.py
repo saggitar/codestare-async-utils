@@ -218,7 +218,6 @@ class TaskNursery(contextlib.AsyncExitStack, helper.Registry):
 
 
     Attributes:
-
         registry: Inherited from :class:`codestare.async_utils.helper.Registry`
 
     """
@@ -259,15 +258,18 @@ class TaskNursery(contextlib.AsyncExitStack, helper.Registry):
 
         return stop_task(task)
 
-    def __init__(self, name=None, loop=None):
+    def __init__(self, name: str | typing.Callable[[], str] | None = None, loop: asyncio.BaseEventLoop | None = None):
+        """
+        Creates a nursery on the loop -- or the current running loop.
+
+        Args:
+            name: if a callable is used, the name can be dynamic
+            loop: if no loop is passed the running loop is used
+        """
         super().__init__()
         self._tasks: typing.List[asyncio.Task] = []
 
-        self.fallback_handler = log.exception
-        """
-        Default exception handler, :func:`logging.Logger.exception` by default
-        """
-        self.loop = loop or asyncio.get_running_loop()
+        self.loop: asyncio.BaseEventLoop = loop or asyncio.get_running_loop()
         """
         Event loop instance to start tasks in, either passed as ``loop`` or current running loop
         """
@@ -284,11 +286,18 @@ class TaskNursery(contextlib.AsyncExitStack, helper.Registry):
         all entered async contexts will be closed and all created tasks will be stopped.
         """
         self.sentinel_task.remove_done_callback(self._task_cb)
-        self.name = name or f'TaskNursery-{len(type(self).registry)}'
+
+        self._name = name or f'TaskNursery-{len(type(self).registry)}'
+
+    @property
+    def name(self):
         """
         Unique name of nursery, used as :class:`~codestare.async_utils.Registry` key by default, see
-        :attr:`.__unique_key_attr__`
+        :attr:`.__unique_key_attr__`. If a callable is passed as `name` during initialization, this callable is
+        used to compute the name dynamically.
         """
+        value = self._name() if callable(self._name) else self._name
+        return str(value)
 
     @property
     def tasks(self):
