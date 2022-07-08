@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import itertools
 import typing
 import warnings
 
@@ -172,6 +173,11 @@ class accessor(typing.Generic[T]):
         """
         For debug purposes
         """
+        self.has_waiting_read = helper.awaitable_predicate(predicate=lambda: self._waiter_count > 0)
+        """
+        Use this awaitable if you want to wait for read access
+        """
+        self._waiter_count = 0
 
     @property
     def value(self) -> T | None:
@@ -181,36 +187,28 @@ class accessor(typing.Generic[T]):
         """
         return self.fget()
 
-    async def set(self, value: T) -> None:
+    async def set(self, value: T, wait_for_read=False) -> None:
         """
         Sets the value (using :attr:`.fset`) and notifies every coroutine waiting on the :attr:`.condition` (e.g.
         :meth:`.get`
 
         Args:
             value: new value passed to :attr:`.fset`
+            wait_for_read: if True, will set the value only after futures are waiting by using :attr:`.get`. Use this
+                to invert the semantics -- a write waiting for a read, instead of a read waiting for a write)
+
         """
+        if wait_for_read:
+            await self.has_waiting_read
+
         async with self.condition:
             self.fset(value)
             self.condition.notify_all()
 
-    @property
-    def has_waiter(self):
-        waiters: collections.deque = getattr(self.condition, '_waiters', None)
-        if waiters is None:
-            warnings.warn(f"has_waiter relies on a private attribute of asyncio.Condition which"
-                          f" cannot be accessed. Please report this. Until this has been addressed"
-                          f" has_waiters will always assume waiters, which might lead to unexpected behaviour.")
-
-            predicate = lambda: True
-        else:
-            predicate = functools.partial(bool, waiters)
-
-        return helper.awaitable_predicate(predicate=predicate, condition=self.condition)
-
     async def get(self,
                   *,
                   predicate: typing.Callable[[T], bool] | None = None,
-                  await_next_write: bool = False) -> T:
+                  wait_for_write: bool = False) -> T:
         """
         Shared access to value produced by :attr:`.fget`
 
@@ -219,7 +217,7 @@ class accessor(typing.Generic[T]):
                 The default predicate (used when ``predicate=None``) returns ``[False, True, True, ...]``, so
                 :meth:`.get` blocks once, until it is notified from a :meth:`.set` and then does not block again.
                 Passing ``predicate=(lambda: True)`` will make :meth:`.get` not block at all.
-            await_next_write: if set to ``True``, and a predicate is passed, the predicate will only be applied
+            wait_for_write: if set to ``True``, and a predicate is passed, the predicate will only be applied
                 once the default predicate (see above) also returns ``True`` i.e. you get the next value that matches
                 the predicate, even if the current value also matches -- **optional**
 
@@ -232,24 +230,34 @@ class accessor(typing.Generic[T]):
         See Also:
             :meth:`asyncio.Condition.wait_for` -- used to wait for internal condition
         """
-        if predicate is None and not await_next_write:
-            await_next_write = True
+        if predicate is None and not wait_for_write:
+            wait_for_write = True
 
         # this predicate returns False, True i.e. it will block once and always return after notify
-        wait_predicate = iter([False, True]).__next__ if await_next_write else None
+        wait_predicate = (
+            itertools.chain.from_iterable([[False], itertools.repeat(True)]).__next__
+            if wait_for_write
+            else None
+        )
 
         if predicate is not None and not callable(predicate):
             raise ValueError(f"{predicate} is not callable")
 
-        def notifying_predicate(acc: accessor):
-            acc.has_waiter.condition.notify_all()
-
+        def combined_predicate(acc: accessor):
             use_value = True if not wait_predicate else wait_predicate()
             matching_value = True if not predicate else predicate(acc.fget())
             return use_value and matching_value
 
         async with self.condition:
-            await self.condition.wait_for(notifying_predicate.__get__(self, None))
+            async with self.has_waiting_read.condition:
+                self._waiter_count += 1
+                self.has_waiting_read.condition.notify_all()
+
+            await self.condition.wait_for(combined_predicate.__get__(self, type(self)))
+
+            async with self.has_waiting_read.condition:
+                self._waiter_count -= 1
+
             return self.fget()
 
     def __repr__(self):

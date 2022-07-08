@@ -254,7 +254,7 @@ class awaitable_predicate:
 
     def __await__(self):
         if self.waiting is None:
-            self.waiting = self._waiter()
+            self.waiting = asyncio.create_task(self._waiter())
 
         return self.waiting.__await__()
 
