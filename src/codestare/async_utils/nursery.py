@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import collections
 import contextlib
 import logging
 import signal
-import sys
 import traceback
 import typing
 import warnings
+
+import sys
 
 from . import helper
 from .type_vars import T
@@ -276,7 +278,7 @@ class TaskNursery(contextlib.AsyncExitStack, helper.Registry):
         # teardown behaviour
         self.push_async_callback(self._stop_all)
         self.add_shutdown_handling(self.loop)
-        self.sentinel_task = mark_sentinel_task(
+        self.sentinel_task: asyncio.Task = mark_sentinel_task(
             self.create_task(
                 self._sentinel_task(event=asyncio.Event()),  # dummy event which is never set
             )
@@ -286,7 +288,6 @@ class TaskNursery(contextlib.AsyncExitStack, helper.Registry):
         all entered async contexts will be closed and all created tasks will be stopped.
         """
         self.sentinel_task.remove_done_callback(self._task_cb)
-
         self._name = name or f'TaskNursery-{len(type(self).registry)}'
 
     @property
@@ -306,6 +307,29 @@ class TaskNursery(contextlib.AsyncExitStack, helper.Registry):
         """
         return self._tasks
 
+    def pop_all(self: TaskNursery) -> TaskNursery:
+        """
+        Preserve the context stack by transferring it to a new instance.
+        """
+        try:
+            new_stack: TaskNursery = super().pop_all()  # noqa
+        except RuntimeError as e:
+            if not str(e) == 'no running event loop':
+                raise RuntimeError(f"Can't handle {e.__class__.__name__}") from e
+
+            warnings.warn(f"Got exception {e} when creating new {self.__class__.__name__} instance."
+                          f"Using the current loop {self.loop} instead.")
+
+            new_stack = type(self)(
+                name=self.name,
+                loop=self.loop
+            )
+            new_stack._exit_callbacks = self._exit_callbacks  # noqa
+            self._exit_callbacks = collections.deque()  # noqa
+
+        new_stack._tasks = self._tasks
+        return new_stack
+
     async def _sentinel_task(self, event):
         try:
             await event.wait()
@@ -320,13 +344,12 @@ class TaskNursery(contextlib.AsyncExitStack, helper.Registry):
 
     async def _stop_all(self):
         stoppable = [task for task in self._tasks if task is not asyncio.current_task()]
-        return await asyncio.gather(*map(self.stop_task, stoppable), return_exceptions=True)
+        results = await asyncio.gather(*map(self.stop_task, stoppable), return_exceptions=True)
+        return results
 
     def _task_cb(self, task: asyncio.Task):
         try:
             result = task.result()
-            if task in self._tasks:
-                self._tasks.remove(task)
             return result
         except asyncio.CancelledError:
             pass
@@ -340,6 +363,9 @@ class TaskNursery(contextlib.AsyncExitStack, helper.Registry):
                     'sentinel': self.sentinel_task
                 }
             )
+        finally:
+            if task in self._tasks:
+                self._tasks.remove(task)
 
     def create_task(self,
                     coro: typing.Generator[_TaskYieldType, None, T] | typing.Awaitable[T],
@@ -359,6 +385,16 @@ class TaskNursery(contextlib.AsyncExitStack, helper.Registry):
         Returns:
             reference to created task
         """
+        kls = self.__class__
+
+        if hasattr(self, 'sentinel_task') and not self.sentinel_task:
+            raise RuntimeError("Can't start tasks with a task nursery that was already shut down. "
+                               f"Create a new {kls.__module__}.{kls.__qualname__} instead")
+
+        if hasattr(self, '_exit_callbacks') and not self._exit_callbacks:
+            warnings.warn(f"Reusing a {kls.__module__}.{kls.__qualname__} that was already closed or 'popped' once, "
+                          f"which should generally be avoided.")
+            self.push_async_callback(self._stop_all)
 
         if sys.version_info >= (3, 8):
             if 'name' not in kwargs:
