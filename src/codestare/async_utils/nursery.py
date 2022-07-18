@@ -93,8 +93,9 @@ async def stop_task(task: asyncio.Task) -> typing.Any:
     if task is asyncio.current_task():
         raise ValueError(f"Not allowed to stop task running `stop_task`!")
 
-    task.cancel()
-    return (await asyncio.gather(task, return_exceptions=True))[0]
+    task.cancel('Stopped during shutdown')
+    result = await asyncio.gather(task, return_exceptions=True)
+    return result[0]
 
 
 def setup_shutdown_handling(loop: asyncio.AbstractEventLoop) -> None:
@@ -165,20 +166,22 @@ async def shutdown(loop: asyncio.AbstractEventLoop, **kwargs) -> None:
     if sig:
         log.info(f"Received exit signal {sig!r}...")
 
-    get_tasks = (lambda: [
-        task_ for task_ in asyncio.all_tasks()
-        if task_ is not asyncio.current_task()
-    ])
+    def get_tasks():
+        non_current = [
+            task_ for task_ in asyncio.all_tasks()
+            if task_ is not asyncio.current_task()
+        ]
+        return non_current
 
     context = kwargs.pop('context', {})
     sentinel = context.get('sentinel')
     if sentinel:
         result = await stop_task(sentinel)
     else:
-        filter_function = (lambda task_: task_ in __sentinel_tasks__)
+        is_sentinel = (lambda task_: task_ in __sentinel_tasks__)
 
         result = await asyncio.gather(
-            *map(stop_task, filter(filter_function, get_tasks()))
+            *map(stop_task, filter(is_sentinel, get_tasks()))
         )
     if result:
         log.debug(f"Sentinel task[s] stopped with result {result!r}")
@@ -336,10 +339,10 @@ class TaskNursery(contextlib.AsyncExitStack, helper.Registry):
         except asyncio.CancelledError:
             pass
 
+        await self.aclose()
+
         self._tasks.remove(self.sentinel_task)
         self.sentinel_task = None
-
-        await self.aclose()
         return "Success"
 
     async def _stop_all(self):
@@ -388,7 +391,7 @@ class TaskNursery(contextlib.AsyncExitStack, helper.Registry):
         kls = self.__class__
 
         if hasattr(self, 'sentinel_task') and not self.sentinel_task:
-            raise RuntimeError("Can't start tasks with a task nursery that was already shut down. "
+            raise RuntimeError("Starting tasks with a task nursery that was already shut down. "
                                f"Create a new {kls.__module__}.{kls.__qualname__} instead")
 
         if hasattr(self, '_exit_callbacks') and not self._exit_callbacks:
