@@ -321,7 +321,7 @@ class TaskNursery(contextlib.AsyncExitStack, helper.Registry):
                 raise RuntimeError(f"Can't handle {e.__class__.__name__}") from e
 
             warnings.warn(f"Got exception {e} when creating new {self.__class__.__name__} instance."
-                          f"Using the current loop {self.loop} instead.")
+                          f" Using the current loop {self.loop} instead.")
 
             new_stack = type(self)(
                 name=self.name,
@@ -341,7 +341,9 @@ class TaskNursery(contextlib.AsyncExitStack, helper.Registry):
 
         await self.aclose()
 
-        self._tasks.remove(self.sentinel_task)
+        if self.sentinel_task in self._tasks:
+            self._tasks.remove(self.sentinel_task)
+
         self.sentinel_task = None
         return "Success"
 
@@ -401,7 +403,7 @@ class TaskNursery(contextlib.AsyncExitStack, helper.Registry):
 
         if sys.version_info >= (3, 8):
             if 'name' not in kwargs:
-                kwargs['name'] = getattr(coro, '__name__', str(coro))
+                kwargs['name'] = getattr(coro, '__name__', repr(coro))
             kwargs['name'] += f":{self.__registry_key__}"
         else:
             if kwargs.pop('name', None):

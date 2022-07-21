@@ -243,10 +243,11 @@ class awaitable_predicate:
 
     """
 
-    def __init__(self, predicate: typing.Callable[[], bool], condition: asyncio.Condition | None = None):
+    def __init__(self, predicate: typing.Callable[[], bool], condition: asyncio.Condition | None = None, timeout=None):
         self.condition = condition or asyncio.Condition()
         self.predicate = predicate
         self.waiting = None
+        self.timeout = timeout
 
     async def _waiter(self):
         async with self.condition:
@@ -256,7 +257,7 @@ class awaitable_predicate:
         if self.waiting is None:
             self.waiting = asyncio.create_task(self._waiter())
 
-        return self.waiting.__await__()
+        return asyncio.wait_for(self.waiting, timeout=self.timeout).__await__()
 
     def __bool__(self):
         return self.predicate()
