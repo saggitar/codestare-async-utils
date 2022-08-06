@@ -208,7 +208,7 @@ class accessor(typing.Generic[T]):
     async def get(self,
                   *,
                   predicate: typing.Callable[[T], bool] | None = None,
-                  wait_for_write: bool = False) -> T:
+                  wait_for_write: bool | None = None) -> T:
         """
         Shared access to value produced by :attr:`.fget`
 
@@ -219,7 +219,9 @@ class accessor(typing.Generic[T]):
                 Passing ``predicate=(lambda: True)`` will make :meth:`.get` not block at all.
             wait_for_write: if set to ``True``, and a predicate is passed, the predicate will only be applied
                 once the default predicate (see above) also returns ``True`` i.e. you get the next value that matches
-                the predicate, even if the current value also matches -- **optional**
+                the predicate, even if the current value also matches. You can set this value to False, to ignore
+                the default predicate behaviour (which is the same as passing ``predicate=(lambda: True)`` and
+                using the default for this value. -- **optional**
 
         Returns:
             value produced by :attr:`.fget`
@@ -230,7 +232,7 @@ class accessor(typing.Generic[T]):
         See Also:
             :meth:`asyncio.Condition.wait_for` -- used to wait for internal condition
         """
-        if predicate is None and not wait_for_write:
+        if predicate is None and wait_for_write is None:
             wait_for_write = True
 
         # this predicate returns False, True i.e. it will block once and always return after notify
